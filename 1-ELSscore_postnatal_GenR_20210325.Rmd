@@ -1,0 +1,1055 @@
+---
+title: "Postnatal Early Life Stress Score"
+author:
+- Isabel Schuurmans
+- Donna de Maat
+- Pauline Jansen
+- Annemarie Luik
+- Charlotte Cecil
+date: '`r Sys.Date()`'
+output:
+  word_document: default
+  pdf_document: default
+subtitle: Generation R
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = 'O:/medewerkers/042647 Schuurmans, I/DATA')
+```
+
+The following file explains how the postnatal early life stress score is constructed in Generation R. For questions, contact Isabel Schuurmans (i.schuurmans@erasmusmc.nl).
+
+# Open library 
+
+Open the packages we need for the computation. 
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+library(car)
+library(lavaan)
+library(semTools)
+library(mice)
+```
+
+# Load data
+
+Read in data and name the dataset 'tmp5'. Consult the excel file for the necessary variables. 
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+tmp5 <- readRDS('tmp5.rds')
+names(tmp5) <- tolower(names(tmp5))
+```
+
+# Functions
+
+## Dichtomizing the BSI
+
+The cutoffs for the brief symptom inventory (BSI) are scale and gender specific. Because the questionnaire is filed in by the main caregiver, respondents could be either male of female. The following function dichotomizes the BSI according to gender specific cutoffs, by linking the respondent variable to the gender specific cutoff value. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+psychoBSI <- function(x, filledinby, persons, cutoff){
+  if(length(persons) != length(cutoff)){
+    print('Length persons and length cutoff must be equal. Please, provide as many person values as cutoff values')
+    break
+  }else{
+    if (is.na(x)){
+      return (NA)
+      break
+    }else{
+      if (is.na(filledinby)){
+        return (NA)
+        break
+      }else{
+        z <- filledinby 
+        y <- cutoff[z]
+        if (cutoff[z] == c(999)){
+          return (NA)
+          break
+        } else{
+          ifelse(x >= y, yes = 1, no = 0)
+        }
+      }
+    }
+  }
+}
+```
+
+## Once a risk, always a risk
+
+For a number of risk factors, we have repeated measurements. To keep the score as comprehensive at possible, we decided to design a function that could apply two different strategies to combine measures over time:
+* **once a risk, always a risk strategy**: when _at least one_ of the repeated measurements reported the adversity, it would indicate the risk factor as being present. This is the default.
+* **chronic risk strategy**: when the adversities were _always_ present, it would indicate the risk factor as being present.  
+
+> NOTE: **always** dichotomize the repeated measurements in advance. The code does allow for the values 0 and 1, or the values 1 and 2. The function always assumes that the highest value indicates the risk!
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+repmeas <- function(items, strategy = 'oncealways'){
+  
+  x <- data.frame(items)
+  
+  # for loop to make sure all repeated measures are dichotimized as binary variables
+  for (i in 1:ncol(x)){
+    
+    if (range(x[,i], na.rm = T)[1] == 1 & range(x[,i], na.rm = T)[2] == 2){
+      x[,i] <- x[,i] - 1}
+    
+    else {
+      if ( (range(x[,i], na.rm = T)[1] != 0 | range(x[,i], na.rm = T)[2] != 1) & ( range(x[,i], na.rm = T)[1] != range(x[,i], na.rm = T)[2] ) ) {
+      stop('Items are not dichotomized')}
+    }
+  }
+  
+  # combine and dichotomize the repeated measures
+  
+  if (strategy == 'oncealways') {
+    temp <- rowMeans(x, na.rm=T)
+    temp[temp > 0] <- 1
+    return(temp)}
+  
+  if (strategy == 'chronic') {
+    temp <- rowMeans(x, na.rm=T)
+    temp[temp < 1] <- 0
+    return(temp)}
+}
+```
+
+## Calculating domain scores 
+
+Domain scores will be calculated by measuring how many adversities are reported. With this function, you will get two measures: 
+* One reflecting the **mean number** of adversities (range between 0 and 1) 
+* One reflecting the **cumulative number** of adversities reported. 
+If a domain is not complete, the domain score will be _NA_. This missing value will be accounted for in the analysis by multiple imputation by chained equations.  
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+domainscore <- function(df){
+  
+  # a dataframe consisting of all the included items is constructed
+  df <- data.frame(df)
+  
+  # check if all variables in df are dichotomized
+  
+  for (i in 1:ncol(df)){
+    
+    if (range(df[,i], na.rm = T)[1] == 1 & range(df[,i], na.rm = T)[2] == 2){
+      df[,i] <- df[,i] - 1}
+    
+    else {
+      if (range(df[,i], na.rm = T)[1] != 0 | range(df[,i], na.rm = T)[2] != 1){
+      stop('Items are not dichotomized')}
+    }
+  }
+  
+  # calculate the mean number of events 
+  temp_mean <- rowMeans(df, na.rm = F)
+  
+  # calculate the sum of events 
+  temp_sum <- rowSums(df, na.rm = F)
+  
+  # make df and return
+  temp_all <- data.frame(temp_mean, temp_sum)
+  return(temp_all)
+
+}
+```
+
+# Construction of the domains
+
+In the following section we will combine the items into domains scores. For the specific items and time of measurement, consult the excel file. The scores are cumulative, meaning we will count how many risk factors are present for each person. We will work with a mean score of items reported, hence the domain score will range between 0 and 1. If prefered the code allows for working with an actual number instead of a mean score as well. 
+
+## Life events
+
+### Collapse and transform variables
+
+#### Repeating a grade
+
+Repeating a grade was measured by maternal self-report questionnaire at age 8 and age 10. Additionally it was assessed during the life events interview at age 9. We used the **once a risk, always a risk strategy** to combine the repeated measurements. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$rep <- repmeas(tmp5[,c('gr1080v1.cleaned_c1001280v2','gr1082v1.c0300182_cleaned','le8')])   
+```                              
+
+#### Compute the domain score
+
+The domain scores are computed for the Life Events. From left to right, the items included are:
+*1 Did your child get seriously sick or did he/she have an accident? Yes
+*2 Did a family member get seriously sick or did somebody have a serious accident? Yes
+*3 Did somebody else, who is important to your child, get seriously sick or did somebody have a serious  accident? Yes
+*4 Is the father/mother or other caretaker still alive? No
+*5 Did somebody else, who your child cared about a lot, die? Yes
+*6 Did ever a pet, who you child cared about a lot, die? Yes
+*7 Does or did your child have to deal with a high workload at school? Yes
+*rep Did your child ever repeat a grade? Yes
+*17 Did your child ever lose something which was important to him/her? Yes
+*23 Did your child move? Yes
+*24 Did your child change schools? Yes
+* Did one of your child's friends move house? Yes
+* Was there a fire or burglary? Yes
+
+"le4", "le5", "le6", le1, le2, le3, 
+Check the excel file for the references and corresponding time points. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5[,c('LC_LE','LC_LEsum')] <- domainscore(tmp5[,c('le1','le2','le3','le4','le5','le6','le7','rep','le17','le23','le24','gr1065v1.g0201165','gr1065v1.g0200365')])
+```
+
+## Contextual risk
+
+### Collapse and transform variables
+
+#### Financial difficulties 
+
+Financial difficulties was measured at age 3 and during the life events interview of age 9. We used the **once a risk, always a risk strategy** to combine these items. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$fidi <- repmeas(tmp5[,c('le10','gr1065v1.g0200765')])
+```                              
+
+#### Trouble paying for food
+
+Trouble paying for food was measured at age 3 and at age 9. First we dichotomized both variables: the 'no problems at all' category was denoted as no risk, whereas the 'few problems' to 'a lot problems' categories were denoted as risk. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$trpa3 <- ifelse(tmp5$gr1065v1g.g0600165 > 1, yes = 1, no = 0) 
+tmp5$trpa9 <- ifelse(tmp5$gr1081v1.e0600181_v2 > 1, yes = 1, no = 0)
+
+```                              
+
+We used the **once a risk, always a risk strategy** to combine the information. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$trpa <- repmeas(tmp5[,c('trpa3','trpa9')])   
+``` 
+
+#### Material deprivation
+
+This questionnaire is based on Statistics Netherlands and EU-SILC, and it measured whether the family possesed items such as a car and a fridge (yes/no questions). We added an item from another questionnaire asking about whether the family possesed a television (according to the original EU-SILC. This item was dichotomized in advance, such that 0 indicated that someone did not possess a television whereas 1 indicated that someone did possess at least one television. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$tvitem <- ifelse(tmp5$gr1081v1i.i0100181_cleaned > 1, yes = 1, no = 0)
+```
+
+Then all the material deprivation items were combined and a row mean was computed to assess how many of the items were possesed by the family. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+made1 <- tmp5[, c('gr1081v1.e0100281_v2','gr1081v1.e0100381_v2','gr1081v1.e0100481_v2','gr1081v1.e0100581_v2','gr1081v1.e0100681_v2','gr1081v1.e0100781_v2','gr1081v1.e0100881_v2','gr1081v1.e0101181_v2','tvitem')]
+```
+
+If a family did only had 75% of the items, risk was indicated as being present. We set material deprivation values to NA if the missing frequence within the questionairre was too high. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$made <- ifelse((rowMeans(is.na(made1)) < .25), 
+                     yes = ifelse(rowMeans(made1, na.rm = T) <= .75, yes = 1, no = 0), 
+                     no = NA)
+```
+
+#### Income
+
+Income was dichotomized according to the Central Statistic Netherlands. If the net household income was below the basic needs level of 1600 euros a month (based on the value of 1650 euros a month for a family with 2 children), risk was indicated to be present. Income was assessed when children were aged 3, 5 and 9.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$income3 <- ifelse(tmp5$gr1065v1g.g0300165 < 5, yes = 1, no = 0)        
+tmp5$income5 <- ifelse(tmp5$income5 < 4, yes = 1, no = 0)             
+tmp5$income9 <- ifelse(tmp5$gr1081v1.e0200181_v2 < 4, yes = 1, no = 0)                    
+```
+
+The risk coming from income was defined by the **once a risk, always a risk strategy** as well as by the **chronic risk strategy**. Therefore the adversity income was be converted into two items: one measuring whether income was low *once* in the childs life, and the other one measuring whether the income has *always* been low.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$inon <- repmeas(tmp5[,c('income3', 'income5', 'income9')])
+tmp5$inch <- repmeas(tmp5[,c('income3', 'income5', 'income9')], strategy = 'chronic')
+```
+
+#### Employment family
+
+First unemployment was dichotimized. For the measurement at age 5, we considered a parent unemployed if they described themselves other than 'paid worker' or 'self-employed'. For the measurement at age 9, unemployment within the family was indicated when they received any kind of benefit (could be social, unemployment or disabily allowances).  
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$emp5m <- ifelse(tmp5$gr1075v1e.b0500175_clean <= 3, yes = 0, no = 1)  
+tmp5$emp5f <- ifelse(tmp5$gr1075v1e.b1200175_clean <= 3, yes = 0, no = 1)  
+tmp5$emp9 <- ifelse(tmp5$gr1081v1e.e0400181_v2 > 1, yes = 1, no = 0)
+```
+
+In the same manner as with income, we converted unemployment into two items: once measuring risk according to the **once a risk, always a risk strategy**, and another one measures risk according to the **chronic risk strategy**. The GR1065v1.G0202365 variable denotes an (already) dichotimized variable on unemployment in the family when child was age 3.  
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$empon <- repmeas(tmp5[,c('gr1065v1.g0202365','emp5m', 'emp5f', 'emp9')])
+tmp5$empch <- repmeas(tmp5[,c('gr1065v1.g0202365','emp5m', 'emp5f', 'emp9')], strategy = 'chronic')
+```
+
+### Compute the domain score
+
+The domain score for contextual risk is computed. The variables including (from left to right) are the following:
+* Tension at the parents' work that has been felt at home; yes
+* Material deprivation; yes
+* Does your family have financial difficulties or did your family ever have them? Yes
+* Are/were there problems in the neighborhood? (e.g. vandalism or insecurity); yes
+* Did you have any trouble paying for your food, rent, electricity bill and such in the past year? Yes
+* Income household; < 1600 euros p/m; once
+* Income household; < 1600 euros p/m; chronically
+* Unemployment within the family, once
+* Unemployment within the family, chronically
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5[,c('LC_CE','LC_CEsum')] <- domainscore(tmp5[,c('gr1065v1.g0200565','made','fidi','le9','trpa','inon','inch','empon','empch')])
+```
+
+## Parental risk
+
+### Collapse and transform variables
+
+#### Education
+
+Education level of main caregiver and partner was assesed when children were age 3 and age 5. We dichotmized the measures according to Statistics Netherlands, who consider an educational level of secondary phase 1 and below as low education. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$edu3m <- ifelse(tmp5$educm3 <= 3, yes = 1, no = 0)           
+tmp5$edu5m <- ifelse(tmp5$educm5 <= 3, yes = 1, no = 0)           
+tmp5$edu3p <- ifelse(tmp5$educp3 <= 3, yes = 1, no = 0)           
+tmp5$edu5p <- ifelse(tmp5$educp5 <= 3, yes = 1, no = 0)           
+```
+
+Repeated measurements were combined using the **once a risk, always a risk** strategy. We included the educational level of both parents in the domain score seperately. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$edum <- repmeas(tmp5[,c('edu3m', 'edu5m')])
+tmp5$edup <- repmeas(tmp5[,c('edu3p', 'edu5p')])
+```
+
+#### Early parenthood
+
+Age of the mother and the father were assesed during intake. Two variables were created, of which the first assesed whether the mother was 18 years or younger during pregnancy.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$agem <- ifelse(tmp5$age_m_v2 < 19, yes = 1, no = 0)
+```
+
+The second variable assesed whether the father was 18 years or younger during pregnancy. We had two variables assesing the age of the father (partner or biological father). Mostly only one was filled in, but for mother whose partner was different from the biological father, we applied the **once a risk, always a risk strategy**. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$agepa <- ifelse(tmp5$age_p_v2 < 19, yes = 1, no = 0)      
+tmp5$agebf <- ifelse(tmp5$age_bf_v2 < 19, yes = 1, no = 0)
+tmp5$agep <- repmeas(tmp5[,c('agepa', 'agebf')])
+
+```
+
+#### Psychopathology
+
+We included three different syndrom domains as possible adversities, namely interpersonal sensitiviy, depression and anxiety. These syndroms were dichotmized according to the Dutch BSI manual. Cutoffs values denote the transition from health to sickness and are gender and scale specific. We created empty variables to save the dichotized scores. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$i3m <- tmp5$i9m <- tmp5$d3m <- tmp5$d9m <- tmp5$a3m <- tmp5$a9m <- tmp5$i3f <- tmp5$i9f <- tmp5$d3f <- tmp5$d9f <- tmp5$a3f <- tmp5$a9f <- rep(NA, nrow(tmp5))
+```
+
+The different syndrom domains were measured in main caregivers and partners at the ages 3 and 9. Repeated measurement were combined according to the **once a risk, always a risk strategy**.  
+
+##### Interpersonal sensitivity
+
+First we dichotimized the measurements of the main caregiver. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# Age 3
+for (i in 1:length(tmp5$i3m)){
+  tmp5$i3m[i] <- psychoBSI(x = tmp5$ibsi3m[i], 
+                           filledinby = tmp5$bsi.gr1065_filledinby[i], 
+                           person = c(1:5), 
+                           cutoff = c(.95, .78, .78, 1.12, 999))}
+
+# Age 9
+for (i in 1:length(tmp5$i9m)){
+  tmp5$i9m[i] <- psychoBSI(x = tmp5$ibsi9m[i], 
+                           filledinby = tmp5$bsi.gr1081_filledinby[i], 
+                           person = c(1:5), 
+                           cutoff = c(.95, .95, .78, .78, 1.12))}
+```
+
+Then we combined these two measurements.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$im <- repmeas(tmp5[,c('i3m', 'i9m')])
+```
+
+Second we dichotimized the measurements of the partner.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# Age 3
+for (i in 1:length(tmp5$i3f)){
+  tmp5$i3f[i] <- psychoBSI(x = tmp5$ibsi3f[i], 
+                           filledinby = tmp5$bsi.gr1066_filledinby[i], 
+                           person = c(1:5), 
+                           cutoff = c(.78, .78, .95, 1.12, 999))}
+
+# Age 9
+for (i in 1:length(tmp5$i9f)){
+  tmp5$i9f[i] <- psychoBSI(x = tmp5$ibsi9f[i], 
+                           filledinby = tmp5$bsi.gr1083_filledinby[i], 
+                           person = c(1:5), 
+                           cutoff = c(.78, .78, .95, .95, 1.12))}
+```
+
+And we also combined these two measurements.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$psif <- repmeas(tmp5[,c('i3f', 'i9f')])
+```
+
+##### Depression
+
+For depression we followed a similar approach, first dichotimizing the measurements of the main caregiver.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# Age 3
+for (i in 1:length(tmp5$d3f)){
+  tmp5$d3m[i] <- psychoBSI(x = tmp5$dbsi3m[i], 
+                           filledinby = tmp5$bsi.gr1065_filledinby[i], 
+                           person = c(1:5), 
+                           cutoff = c(.80, .71, .71, .75, 999))}
+
+# Age 9
+for (i in 1:length(tmp5$d9m)){
+  tmp5$d9m[i] <- psychoBSI(x = tmp5$dbsi9m[i], 
+                           filledinby = tmp5$bsi.gr1081_filledinby[i], 
+                           person = c(1:5), 
+                           cutoff = c(.80, .80, .71, .71, .75))}
+```
+
+Then we combined these two measurements.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$dm <- repmeas(tmp5[,c('d3m', 'd9m')])
+```
+
+Second we dichotimized the measurements of the partner.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# Age 3
+for (i in 1:length(tmp5$d3f)){
+  tmp5$d3f[i] <- psychoBSI(x = tmp5$dbsi3f[i], 
+                           filledinby = tmp5$bsi.gr1066_filledinby[i], 
+                           person = c(1:5), 
+                           cutoff = c(.71, .71, .80, .75, 999))}
+
+# Age 9
+for (i in 1:length(tmp5$d9f)){
+  tmp5$d9f[i] <- psychoBSI(x = tmp5$dbsi9f[i], 
+                           filledinby = tmp5$bsi.gr1083_filledinby[i], 
+                           person = c(1:5), 
+                           cutoff = c(.71, .71, .80, .80, .75))}
+
+```
+
+And we again combined these two measurements.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$df <- repmeas(tmp5[,c('d3f', 'd9f')])
+```
+
+##### Anxiety
+
+In final, for anxiety we again dichotimized the measurements of the main caregiver.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# Age 3
+for (i in 1:length(tmp5$a3f)){
+  tmp5$a3m[i] <- psychoBSI(x = tmp5$absi3m[i], 
+                           filledinby = tmp5$bsi.gr1065_filledinby[i], 
+                           person = c(1:5), 
+                           cutoff = c(.71, .65, .65, .75, 999))}
+
+# Age 9
+for (i in 1:length(tmp5$a9m)){
+  tmp5$a9m[i] <- psychoBSI(x = tmp5$absi9m[i], 
+                           filledinby = tmp5$bsi.gr1081_filledinby[i], 
+                           person = c(1:5), 
+                           cutoff = c(.71, .71, .65, .65, .75))}
+```
+
+Then we combined these two measurements.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$am <- repmeas(tmp5[,c('a3m', 'a9m')])
+```
+
+We also dichotimized the measurements of the partner.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# Age 3
+for (i in 1:length(tmp5$a3f)){
+  tmp5$a3f[i] <- psychoBSI(x = tmp5$absi3f[i], 
+                           filledinby = tmp5$bsi.gr1066_filledinby[i], 
+                           person = c(1:5), 
+                           cutoff = c(.71, .71, .80, .75, 999))}
+
+# Age 9
+for (i in 1:length(tmp5$d9f)){
+  tmp5$a9f[i] <- psychoBSI(x = tmp5$absi9f[i], 
+                           filledinby = tmp5$bsi.gr1083_filledinby[i], 
+                           person = c(1:5), 
+                           cutoff = c(.71, .71, .80, .80, .75))}
+```
+
+And we combined these two measurements.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$af <- repmeas(tmp5[,c('a3f', 'a9f')])
+```
+
+### Compute the domain score
+
+The domain score for parental risk is computed.The variables included are (from left to right):
+* Education main caregiver; <  phase 2 (higher) secondary education, once
+* Education partner; <  phase 2 (higher) secondary education , once
+* Interpersonal sensitivity main caregiver; > 0.95
+* Interpersonal sensitivity partner; > 0.78
+* Depression main caregiver; > 0.80
+* Depression partner; > 0.71
+* Anxiety main caregiver; > 0.71
+* Anxiety partner; > 0.65
+* Early parenthood; age mother <19 yrs
+* Early parenthood; age partner <19 yrs
+
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5[,c('LC_PR','LC_PRsum')] <- domainscore(tmp5[,c('edum','edup','im','psif','dm','df','am','af','agem','agep')])
+```
+
+## Interpersonal risk
+
+### Collapse and transform variables
+
+#### Marital status
+
+Marital status was measured at age 3, 5 and 9. Ages 5 and 9 were yet dichotmized, age 3 still needed to be done. We dichomomized the variable such that having a partner with whom you live in is not a risk, whereas having no partner or having a partner without living together was considered a risk. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$mari3 <- ifelse(tmp5$gr1065v1x.x0500165 > 1, yes = 1, no = 0)
+```
+
+We combined the repeated measurement according to the **once a risk, always a risk strategy**.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$mari <- repmeas(tmp5[,c('mari3','mar_dich5','le14')])
+```
+
+#### Family size
+
+Family size was considered a risk factor when a family had more than three children. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$fams3 <- ifelse(tmp5$gr1065v1g.g0400265 > 3, yes = 1, no = 0)                 
+tmp5$fams5 <- ifelse(tmp5$gr1075v1b3.children_household_clean > 3, yes = 1, no = 0)    
+```
+
+Repeated measurements were combined according to the **once a risk, always a risk strategy**.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$fams <- repmeas(tmp5[,c('fams3', 'fams5')])
+```
+
+#### General functioning of the family
+
+General functioning of the family was measured with the family assessment device. A maternal report was available at age 5, and both a maternal and paternal report was available at age 9. Since only the maternal report was repeated, we did not work with a combining strategy. Instead, age 5 and age 9 (mother and partner seperately) were included in the score individually
+
+The cutoff score provided by the manual was used to dichotomize the variable. The total score at age 5 was already dichotomously available in the dataset. The scores from age 9 were dichotomized manually.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$fad9mdich <- ifelse(tmp5$fad9m > 2.17, yes = 1, no = 0)
+tmp5$fad9fdich <- ifelse(tmp5$fad9f > 2.17, yes = 1, no = 0)
+```
+
+### Compute the domain score
+
+The domain score for interpersonal risk is computed.We included the following items (from left to right):
+* Problems with marriage relations; yes
+* Marital status; single
+* Family size; > 3 children
+* Family distress according to main caregiver; > 2.17
+* Family distress according to main caregiver; > 2.17
+* Family distress according to partner; > 2.17
+* Has your child ongoing conflicts with a family member (or did your child ever have them)? Yes
+* Has your child ongoing conflict with somebody else (or did your child ever have them)? Yes
+* Do other family members have ongoing conflicts with each other (or did they ever have them)? Yes
+* Are you and your partner divorced or seperated? Yes
+* Did your child lose a good friend due to an argument? Yes
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5[,c('LC_IP','LC_IPsum')] <- domainscore(tmp5[,c('gr1065v1.g0201965','mari','fams','fad5','fad9mdich','fad9fdich','le11','le12','le13','le14','le16')])
+```
+
+## Direct victimization
+
+### Collapse and transform variables
+
+#### Bullying
+
+Bullying was assesed by asking the main caregiver and the teacher about whether and how often the child was bullied (seperate questions asking about verbal, physical or relational bullying). We constructed a dataframe with all the variables assessing bullying (first three reported by main caregiver, last three reported by teacher).
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+bully <- data.frame(tmp5[,c('gr1080v1e.e0100280','gr1080v1e.e0100380','gr1080v1e.e0100480')],
+                    (tmp5[,c('gr1079v1.d0100179','gr1079v1.d0100279','gr1079v1.d0100379')]+1))
+```
+
+We dichotmized the variables: being verbally/physically/relationally bullied once a week or more was considered an adversity.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+for (i in 1:length(bully)) {                                      
+  bully[i]<-ifelse(bully[i] >= 4, yes = 1, no = 0) }
+```
+
+The variables are combined according to the *once a risk, always a risk strategy*: if one of the variables reported any kind of bullying was happened at least once a week as reported by the main caregiver or the teacher, we would consider the risk factor as being present.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5$bullying <- repmeas(bully)
+```
+
+### Compute the domain score
+
+The domain score for direct victimization is computed. The variables included are (from left to right):
+* Harsh parenting main caregiver > 80th percentile
+* Harsh parenting partner > 80th percentile
+* Bullying more than once a week according to teacher, main caregiver or partner; yes
+* Did someone ever use physical violence against you child? For example, beating him/her up. Yes
+* Did somebody use almost physical violence against your child? So that it not actually happened, but your child was frightened. Yes
+* Did anybody make sexual comments or movements towards your child? Yes
+* Did your child participate in inappropriate sexual behavior? Yes
+* Did somebody spread mean rumors or gossip about your child? Yes
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+tmp5[,c('LC_DV','LC_DVsum')] <- domainscore(tmp5[,c('parentingv1.harsh80_m','parentingv1.harsh80_p','bullying','le18','le19','le20','le21','le22')])
+```
+
+## Construct final dataset
+
+To keep everything comprehensive I constructed a dataset only consisting of the variables I used in my analysis. At this point I also included the demographic auxiliary variables. If the variable was assessed prenatally as well as postnatally, both were included 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# all names were lowered
+names(tmp5) <- tolower(names(tmp5))
+
+tmp <- tmp5[,c('idc', 
+                  
+                     # all variables for postnatal risk
+                     'le18','le19','le20','le21','le22','parentingv1.harsh80_m','parentingv1.harsh80_p','bullying', 
+                     'edum','edup','agem','agep','im','am','dm','psif','df','af',
+                     'le11','le12','le13','le14','le16','gr1065v1.g0201965','mari','fams','fad5','fad9mdich','fad9fdich',
+                     'gr1065v1.g0200565','made','fidi','le9','trpa','inon','inch','empon','empch',
+                     'le1','le2','le3','le4','le5','le6','le7','rep','le17','le23','le24','gr1065v1.g0201165','gr1065v1.g0200365',
+                  
+                     # all variables for prenatal risk
+                     "divorce","moved_house","unemployed","friend_relative_died","family_member_died","family_member_ill",         
+                     "admitted_to_hospital","health","mother_work_study_problems","blood_loss","examination","victim_robbery",         
+                     "pregnancy_planned","baby_worried","obstetric_care","pregnancy_worried","housing_basic_living","housing_defects",          
+                     "housing_adequacy","financial_problems","financial_difficulties","income_reduced","criminal_record_m","mardich.y",                   
+                     "gsi_mdich","publicordermdich","forcemdich","difficulties_partner","difficulties_family_friend",'difficulties_contacts',
+                     "family_affection","famsize","family_decisions_problems","family_acceptance","family_acception","family_trust",              
+                     "family_painful_feelings","family_decisions","family_conflict","family_plans","family_talk_sadness","family_talk_worries",     
+                     "family_support", 'edu',
+                     
+                     # all domain scores
+                     'life_events_m','contextual_m','personal_stress_m','interpersonal_m',
+                     'lc_le','lc_ce','lc_pr','lc_ip', 'lc_dv',
+                     
+                     # outcome variables and covariates
+                     'cito', 'iq', 'age', 'agechild13', 'reportcito',
+               
+                     # auxilairy variables for imputation
+                     'ethnicity', 'age_m_v2', 'parity', 'smoking', 'gestbir', 'weight', 'bmi_1','bmimotherf5', 'gender', 'dep', 'dep_p', "dbsi3m","dbsi3f", "visit13")]
+
+# variables that contain consent: "fupfase1" ,"fupfase2", "fupfase3_5", "fupfase3_9","fupfase4_13" , "visit13"
+
+saveRDS(tmp, "O:/medewerkers/042647 Schuurmans, I/Project_1_ELS_CM/tmp.rds")
+```
+
+### Exclude participants (flowchart)
+
+First we calculate the percentage of missigness for each developmental period.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# postnatal
+tmp$totalmispost <- rowMeans(is.na(tmp[,c('le18','le19','le20','le21','le22','parentingv1.harsh80_m','parentingv1.harsh80_p','bullying', 
+                                              'edum','edup','agem','agep','im','am','dm','psif','df','af',
+                                              'le11','le12','le13','le14','le16','gr1065v1.g0201965','mari','fams','fad5','fad9mdich','fad9fdich',
+                                              'gr1065v1.g0200565','made','fidi','le9','trpa','inon','inch','empon','empch',
+                                              'le1','le2','le3','le4','le5','le6','le7','rep','le17','le23','le24','gr1065v1.g0201165','gr1065v1.g0200365')]))
+
+# prenatal
+tmp$totalmispre <- rowMeans(is.na(tmp[,c("divorce","moved_house","unemployed","friend_relative_died","family_member_died","family_member_ill",         
+                                             "admitted_to_hospital","health","mother_work_study_problems","blood_loss","examination","victim_robbery",         
+                                             "pregnancy_planned","baby_worried","obstetric_care","pregnancy_worried","housing_basic_living","housing_defects",          
+                                             "housing_adequacy","financial_problems","financial_difficulties","income_reduced","criminal_record_m","mardich.y",                   
+                                             "agem","gsi_mdich","publicordermdich","forcemdich","difficulties_partner","difficulties_family_friend","difficulties_contacts",'edu',
+                                             "family_affection","famsize","family_decisions_problems","family_acceptance","family_acception","family_trust",              
+                                             "family_painful_feelings","family_decisions","family_conflict","family_plans","family_talk_sadness","family_talk_worries",     
+                                             "family_support")]))
+```
+
+Now we exclude those with (too many) missings. We allowed for 50% missigness for each developmental period. In block 4 and 5 I additionally excluded children with missing academic achievement (cito) or IQ. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# We start with the kids who participated and the focus at 13 wave
+data <- tmp[which(!is.na(tmp$visit13)),]   
+block1 <- nrow(data)
+
+# Exclude kids with too many missings in the postnatal period
+data1 <- data[which(data$totalmispre <.50),]   
+block2 <- nrow(data1)
+suba <- block2-block1
+
+# Exclude kids with too many missings in the postnatal period 
+data2 <- data1[which(data1$totalmispost <.50),]   
+block3 <- nrow(data2)
+subb <- block3-block2
+
+# Starting sample: kids with iq data
+data3 <- data2[which(!is.na(data2$iq)),]
+block4 <- nrow(data3)
+subc <- block4-block3
+
+# Exclude kids with missing cito data
+data4 <- data3[which(!is.na(data3$cito)),]
+block5 <- nrow(data4)
+subd <- block5-block4
+
+# Flowchart
+(figureS1 <- list(block1, suba, block2, subb, block3, subc, block4, subd, block5))
+
+# Rename final datset:
+datarisk <- data4
+```
+
+# Analysis
+
+## Outcome variables
+
+To interpret the effect ELS has on the IQ-achievement discrepancy, IQ and academic achievement, I standardized the outcome variables.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# standardise IQ and COGNITION
+datarisk$cito <- scale(datarisk$cito)
+meansdIQ <- c(mean(datarisk$iq), sd(datarisk$iq))
+datarisk$iq <- scale(datarisk$iq)
+datarisk[,c('citotest')] <- NULL
+meansdIQ
+```
+
+discrepancy was quantified using a residual approach, as initiated by Thorndike (1963). A regression model was performed with IQ as predictor and academic achievement as outcome. We saved the standardized residuals of the model, which indicate the variance in academic achievement not explained by IQ. These standardized residual therefore define a continuous measure of the IQ-achievement discrepancy.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+datarisk$cm <- scale(resid(lm(cito ~ iq, data = datarisk)))
+```
+
+## Imputation model
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# set up run
+imp0 <- mice(datarisk, maxit = 0, defaultMethod = c('pmm', 'pmm', 'pmm', 'pmm'))
+```
+
+```{r, include=FALSE}
+# consider imputation method 
+meth <- imp0$method
+```
+
+I used passive imputation for the domain, by calculating the mean sum of events for each domain.
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# change the imputation method
+meth['lc_le'] <- "~I( (le1 + le2 + le3 + le4 + le5 + le6 + le7 + rep + le17 + le23 + le24 + gr1065v1.g0201165 + gr1065v1.g0200365) / 13)"
+meth['lc_ce'] <- "~I( (gr1065v1.g0200565 + made + fidi + le9 + trpa + inon + inch + empon + empch) / 9)"
+meth['lc_pr'] <- "~I( (edum + edup + agem + agep + im + am + dm + psif + df + af) / 10)"
+meth['lc_ip'] <- "~I( (le11 + le12 + le13 + le14 + le16 + gr1065v1.g0201965 + mari + fams + fad5 + fad9mdich + fad9fdich) / 11)"
+meth['lc_dv'] <- "~I( (le18 + le19 + le20 + le21 + le22 + parentingv1.harsh80_m + parentingv1.harsh80_p + bullying) / 8)"
+meth['life_events_m'] <- "~I( (family_member_died + friend_relative_died + family_member_ill + admitted_to_hospital + health + unemployed + mother_work_study_problems + moved_house + blood_loss + examination + baby_worried + pregnancy_worried + obstetric_care + pregnancy_planned + victim_robbery) / 15)"
+meth['contextual_m'] <- "~I( (financial_problems + financial_difficulties + income_reduced + housing_defects + housing_adequacy + housing_basic_living) /6 )"
+meth['personal_stress_m'] <- "~I( (agem + gsi_mdich + forcemdich + publicordermdich + criminal_record_m + edu) / 6)"
+meth['interpersonal_m'] <- "~I( (difficulties_contacts + difficulties_partner + difficulties_family_friend + mardich.y + divorce + family_support + family_acceptance + family_affection + family_acception + family_trust + family_painful_feelings + family_decisions + family_conflict + family_decisions_problems + family_plans + family_talk_sadness + family_talk_worries + famsize) / 18)"
+```
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# change predictor matrix
+predictormatrix <- imp0$predictorMatrix
+```
+
+To prevent multicollinearity, the predictormatrix was adjusted. We selected a set of auxialiary variables that were either related to missigness or otherwise to the domain scores, and that were used for every variable. When information was available prenatal as well postnatal, we used the opposite period. 
+* Gender
+* Ethnicity
+* Maternal age at birth
+* Parity
+* Smoking during pregnancy
+* Gestational weight
+* Gestational age birth
+* outcome variables: IQ-achievement discrepancy
+* BMI (prenatal or postnatal)
+* Marital status (prenatal or postnatal)
+* Education (prenatal or postnatal)
+* Depression (prenatal or postnatal)
+  
+For imputation for the test items, we did not use a full imputation model (as we had almost 130 items). However, we used the items within a certain domain to impute other items within the domain. Additionally we used the total scores from other domains and also we used the outcome variables and auxiliary variables. 
+
+Auxiliary variables are imputed using only total domain scores + other auxiliary variables. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# do not use IDC as predictor:
+predictormatrix[, "idc"] <-predictormatrix["idc",] <- 0
+
+# Impute auxiliary variables
+predictormatrix[c("ethnicity","age_m_v2","parity","smoking","gestbir","weight" ,"bmi_1","bmimotherf5","gender","dep","dep_p","dbsi3m","dbsi3f"),
+                c('family_member_died','friend_relative_died','family_member_ill','admitted_to_hospital','health','unemployed',
+                   'mother_work_study_problems','moved_house','blood_loss','examination','baby_worried','pregnancy_worried','obstetric_care',
+                   'pregnancy_planned','victim_robbery', "divorce",
+                  "housing_basic_living","housing_defects",
+                  "housing_adequacy","financial_problems","financial_difficulties","income_reduced","criminal_record_m",
+                  "agem","gsi_mdich","publicordermdich","forcemdich","difficulties_partner",
+                  "difficulties_family_friend","family_affection","famsize","family_decisions_problems","family_acceptance",
+                  "family_acception","family_trust","family_painful_feelings","family_decisions","family_conflict",
+                  "family_plans","family_talk_sadness","family_talk_worries","family_support", 'difficulties_contacts',
+                  'le18','le19','le20','le21','le22','parentingv1.harsh80_m','parentingv1.harsh80_p','bullying','edum',
+                  'edup','agem','agep','im','am','dm','psif','df','af','le11','le12','le13','le14','le16','gr1065v1.g0201965',
+                  'mari','fams','fad5','fad9mdich','fad9fdich','gr1065v1.g0200565','made','fidi','le9','trpa','inon','inch',
+                  'empon','empch','le1','le2','le3','le4','le5','le6','le7','rep','le17','le23','le24','gr1065v1.g0201165',
+                  'gr1065v1.g0200365', "ethnicity","age_m_v2","parity","smoking","gestbir","weight" ,"bmi_1","bmimotherf5","gender","dep","dep_p","dbsi3m","dbsi3f", 'mardich.y', 'edu')] <- 0
+
+# additionally, personal stress and dep had a high correlation so I did not include them
+predictormatrix['dep', 'personal_stress_m']<-0
+  
+# PRENATAL
+# LE domain
+predictormatrix[c('family_member_died','friend_relative_died','family_member_ill','admitted_to_hospital','health','unemployed',
+                   'mother_work_study_problems','moved_house','blood_loss','examination','baby_worried','pregnancy_worried','obstetric_care',
+                   'pregnancy_planned','victim_robbery'),
+                
+                c("divorce",
+                  "housing_basic_living","housing_defects",
+                  "housing_adequacy","financial_problems","financial_difficulties","income_reduced","criminal_record_m",
+                  "agem","gsi_mdich","publicordermdich","forcemdich","difficulties_partner",
+                  "difficulties_family_friend","family_affection","famsize","family_decisions_problems","family_acceptance",
+                  "family_acception","family_trust","family_painful_feelings","family_decisions","family_conflict",
+                  "family_plans","family_talk_sadness","family_talk_worries","family_support", 'difficulties_contacts',
+                  'le18','le19','le20','le21','le22','parentingv1.harsh80_m','parentingv1.harsh80_p','bullying','edu',
+                  'edup','agem','agep','im','am','dm','psif','df','af','le11','le12','le13','le14','le16','gr1065v1.g0201965',
+                  'mardich.y','fams','fad5','fad9mdich','fad9fdich','gr1065v1.g0200565','made','fidi','le9','trpa','inon','inch',
+                  'empon','empch','le1','le2','le3','le4','le5','le6','le7','rep','le17','le23','le24','gr1065v1.g0201165',
+                  'gr1065v1.g0200365', "bmi_1", 'dep', 'dep_p', "life_events_m")] <- 0
+
+# CE domain
+predictormatrix[c('financial_problems','financial_difficulties','income_reduced','housing_defects','housing_adequacy','housing_basic_living'),
+                c('family_member_died','friend_relative_died','family_member_ill','admitted_to_hospital','health','unemployed',
+                   'mother_work_study_problems','moved_house','blood_loss','examination','baby_worried','pregnancy_worried','obstetric_care',
+                   'pregnancy_planned','victim_robbery',
+                  "divorce",'criminal_record_m',
+                  "agem","gsi_mdich","publicordermdich","forcemdich","difficulties_partner",
+                  "difficulties_family_friend","family_affection","famsize","family_decisions_problems","family_acceptance",
+                  "family_acception","family_trust","family_painful_feelings","family_decisions","family_conflict",
+                  "family_plans","family_talk_sadness","family_talk_worries","family_support", 'difficulties_contacts',
+                  'le18','le19','le20','le21','le22','parentingv1.harsh80_m','parentingv1.harsh80_p','bullying','edu',
+                  'edup','agem','agep','im','am','dm','psif','df','af','le11','le12','le13','le14','le16','gr1065v1.g0201965',
+                  'mardich.y','fams','fad5','fad9mdich','fad9fdich','gr1065v1.g0200565','made','fidi','le9','trpa','inon','inch',
+                  'empon','empch','le1','le2','le3','le4','le5','le6','le7','rep','le17','le23','le24','gr1065v1.g0201165',
+                  'gr1065v1.g0200365', "bmi_1", 'dep', 'dep_p', "contextual_m")] <- 0
+
+# PR domain # I did not allow edu and dep here because of multicolinearity
+predictormatrix[c('agem','gsi_mdich','forcemdich','publicordermdich','criminal_record_m','edu'),
+                c('financial_problems','financial_difficulties','income_reduced','housing_defects','housing_adequacy','housing_basic_living',
+                  'family_member_died','friend_relative_died','family_member_ill','admitted_to_hospital','health','unemployed',
+                   'mother_work_study_problems','moved_house','blood_loss','examination','baby_worried','pregnancy_worried','obstetric_care',
+                   'pregnancy_planned','victim_robbery',
+                  "divorce",
+                  "difficulties_partner",
+                  "difficulties_family_friend","family_affection","famsize","family_decisions_problems","family_acceptance",
+                  "family_acception","family_trust","family_painful_feelings","family_decisions","family_conflict",
+                  "family_plans","family_talk_sadness","family_talk_worries","family_support", 'difficulties_contacts',
+                  'le18','le19','le20','le21','le22','parentingv1.harsh80_m','parentingv1.harsh80_p','bullying',
+                  'agem','agep','im','am','dm','psif','df','af','le11','le12','le13','le14','le16','gr1065v1.g0201965',
+                  'mardich.y','fams','fad5','fad9mdich','fad9fdich','gr1065v1.g0200565','made','fidi','le9','trpa','inon','inch',
+                  'empon','empch','le1','le2','le3','le4','le5','le6','le7','rep','le17','le23','le24','gr1065v1.g0201165',
+                  'gr1065v1.g0200365', "bmi_1", 'dep', 'dep_p', 'dbsi3m','dbsi3f', "personal_stress_m", 'edum','edup')] <- 0
+
+# IP domain
+predictormatrix[c('difficulties_contacts','difficulties_partner','difficulties_family_friend','mardich.y','divorce','family_support',
+                   'family_acceptance','family_affection','family_acception','family_trust','family_painful_feelings','family_decisions',
+                   'family_conflict','family_decisions_problems','family_plans','family_talk_sadness','family_talk_worries','famsize'),
+                c('financial_problems','financial_difficulties','income_reduced','housing_defects','housing_adequacy','housing_basic_living',
+                  'family_member_died','friend_relative_died','family_member_ill','admitted_to_hospital','health','unemployed',
+                   'mother_work_study_problems','moved_house','blood_loss','examination','baby_worried','pregnancy_worried','obstetric_care',
+                   'pregnancy_planned','victim_robbery',
+                  'criminal_record_m',
+                  "agem","gsi_mdich","publicordermdich","forcemdich", 
+                  'le18','le19','le20','le21','le22','parentingv1.harsh80_m','parentingv1.harsh80_p','bullying','edu',
+                  'edup','agem','agep','im','am','dm','psif','df','af','le11','le12','le13','le14','le16','gr1065v1.g0201965',
+                  'mardich.y','fams','fad5','fad9mdich','fad9fdich','gr1065v1.g0200565','made','fidi','le9','trpa','inon','inch',
+                  'empon','empch','le1','le2','le3','le4','le5','le6','le7','rep','le17','le23','le24','gr1065v1.g0201165',
+                  'gr1065v1.g0200365', "bmi_1", 'dep', 'dep_p', "interpersonal_m")] <- 0
+
+# POSTNATAL
+# LE domain
+predictormatrix[c('le1','le2','le3','le4','le5','le6','le7','rep','le17','le23','le24','gr1065v1.g0201165','gr1065v1.g0200365'), 
+                c('gr1065v1.g0200565','made','fidi','le9','trpa','inon','inch','empon','empch',
+                  'gr1065v1.g0201965','mari','fams','fad5','fad9mdich','fad9fdich','le11','le12','le13','le14','le16',
+                  'edum','parentingv1.harsh80_m','parentingv1.harsh80_p','bullying','le18','le19','le20','le21','le22',
+                  'edup','agem','agep','im','am','dm','psif','df','af',
+                  "divorce","moved_house","unemployed","friend_relative_died","family_member_died","family_member_ill",
+                  "admitted_to_hospital","health","mother_work_study_problems","blood_loss","examination","victim_robbery",
+                  "baby_worried","obstetric_care","pregnancy_worried","housing_basic_living","housing_defects",
+                  "housing_adequacy","financial_problems","financial_difficulties","income_reduced","criminal_record_m",
+                   "agem","gsi_mdich","publicordermdich","forcemdich","difficulties_partner","pregnancy_planned",
+                  "difficulties_family_friend","family_affection","famsize","family_decisions_problems","family_acceptance",
+                  "family_acception","family_trust","family_painful_feelings","family_decisions","family_conflict",
+                  "family_plans","family_talk_sadness","family_talk_worries","family_support", 'difficulties_contacts', 
+                  'lc_le', 'bmimotherf5','dbsi3m', 'dbsi3f')] <- 0
+
+# CE domain
+predictormatrix[c('gr1065v1.g0200565','made','fidi','le9','trpa','inon','inch','empon','empch'), 
+                c('gr1065v1.g0201965','mari','fams','fad5','fad9mdich','fad9fdich','le11','le12','le13','le14','le16',
+                  'edum','parentingv1.harsh80_m','parentingv1.harsh80_p','bullying','le18','le19','le20','le21','le22',
+                  'edup','agem','agep','im','am','dm','psif','df','af',
+                  'le1','le2','le3','le4','le5','le6','le7','rep','le17','le23','le24','gr1065v1.g0201165',
+                  'gr1065v1.g0200365', 
+                  "divorce","moved_house","unemployed","friend_relative_died","family_member_died","family_member_ill",
+                  "admitted_to_hospital","health","mother_work_study_problems","blood_loss","examination","victim_robbery",
+                  "baby_worried","obstetric_care","pregnancy_worried","housing_basic_living","housing_defects",
+                  "housing_adequacy","financial_problems","financial_difficulties","income_reduced","criminal_record_m",
+                   "agem","gsi_mdich","publicordermdich","forcemdich","difficulties_partner","pregnancy_planned",
+                  "difficulties_family_friend","family_affection","famsize","family_decisions_problems","family_acceptance",
+                  "family_acception","family_trust","family_painful_feelings","family_decisions","family_conflict",
+                  "family_plans","family_talk_sadness","family_talk_worries","family_support", 'difficulties_contacts', 
+                  'lc_ce', 'bmimotherf5','dbsi3m', 'dbsi3f')] <- 0
+
+# PR domain # I did not allow edu and dep here because of multicolinearity
+predictormatrix[c('edum','edup','im','psif','dm','df','am','af','agem','agep'), 
+                c('edu','parentingv1.harsh80_m','parentingv1.harsh80_p','bullying','le18','le19','le20','le21','le22',
+                  'gr1065v1.g0201965','mari','fams','fad5','fad9mdich','fad9fdich','le11','le12','le13','le14','le16',
+                  'gr1065v1.g0200565','made','fidi','le9','trpa','inon','inch',
+                  'empon','empch','le1','le2','le3','le4','le5','le6','le7','rep','le17','le23','le24','gr1065v1.g0201165',
+                  'gr1065v1.g0200365', 
+                  "divorce","moved_house","unemployed","friend_relative_died","family_member_died","family_member_ill",
+                  "admitted_to_hospital","health","mother_work_study_problems","blood_loss","examination","victim_robbery",
+                  "baby_worried","obstetric_care","pregnancy_worried","housing_basic_living","housing_defects",
+                  "housing_adequacy","financial_problems","financial_difficulties","income_reduced","criminal_record_m",
+                   "agem","gsi_mdich","publicordermdich","forcemdich","difficulties_partner","pregnancy_planned",
+                  "difficulties_family_friend","family_affection","famsize","family_decisions_problems","family_acceptance",
+                  "family_acception","family_trust","family_painful_feelings","family_decisions","family_conflict",
+                  "family_plans","family_talk_sadness","family_talk_worries","family_support", 'difficulties_contacts', 
+                  'lc_pr', 'bmimotherf5','dbsi3m', 'dbsi3f', 'dep', 'dep_p')] <- 0
+
+# IP domain 
+predictormatrix[c('gr1065v1.g0201965','mari','fams','fad5','fad9mdich','fad9fdich','le11','le12','le13','le14','le16'), 
+                c('edum','parentingv1.harsh80_m','parentingv1.harsh80_p','bullying','le18','le19','le20','le21','le22',
+                  'edup','agem','agep','im','am','dm','psif','df','af',
+                  'gr1065v1.g0200565','made','fidi','le9','trpa','inon','inch',
+                  'empon','empch','le1','le2','le3','le4','le5','le6','le7','rep','le17','le23','le24','gr1065v1.g0201165',
+                  'gr1065v1.g0200365', 
+                  "divorce","moved_house","unemployed","friend_relative_died","family_member_died","family_member_ill",
+                  "admitted_to_hospital","health","mother_work_study_problems","blood_loss","examination","victim_robbery",
+                  "baby_worried","obstetric_care","pregnancy_worried","housing_basic_living","housing_defects",
+                  "housing_adequacy","financial_problems","financial_difficulties","income_reduced","criminal_record_m",
+                   "agem","gsi_mdich","publicordermdich","forcemdich","difficulties_partner","pregnancy_planned",
+                  "difficulties_family_friend","family_affection","famsize","family_decisions_problems","family_acceptance",
+                  "family_acception","family_trust","family_painful_feelings","family_decisions","family_conflict",
+                  "family_plans","family_talk_sadness","family_talk_worries","family_support", 'difficulties_contacts', 
+                  'lc_ip', 'bmimotherf5','dbsi3m', 'dbsi3f')] <- 0
+
+# DV domain 
+predictormatrix[c('parentingv1.harsh80_m','parentingv1.harsh80_p','bullying','le18','le19','le20','le21','le22'), 
+                c('edum',
+                  'edup','agem','agep','im','am','dm','psif','df','af','le11','le12','le13','le14','le16','gr1065v1.g0201965',
+                  'mari','fams','fad5','fad9mdich','fad9fdich','gr1065v1.g0200565','made','fidi','le9','trpa','inon','inch',
+                  'empon','empch','le1','le2','le3','le4','le5','le6','le7','rep','le17','le23','le24','gr1065v1.g0201165',
+                  'gr1065v1.g0200365', 
+                  "divorce","moved_house","unemployed","friend_relative_died","family_member_died","family_member_ill",
+                  "admitted_to_hospital","health","mother_work_study_problems","blood_loss","examination","victim_robbery",
+                  "baby_worried","obstetric_care","pregnancy_worried","housing_basic_living","housing_defects",
+                  "housing_adequacy","financial_problems","financial_difficulties","income_reduced","criminal_record_m",
+                   "agem","gsi_mdich","publicordermdich","forcemdich","difficulties_partner","pregnancy_planned",
+                  "difficulties_family_friend","family_affection","famsize","family_decisions_problems","family_acceptance",
+                  "family_acception","family_trust","family_painful_feelings","family_decisions","family_conflict",
+                  "family_plans","family_talk_sadness","family_talk_worries","family_support", 'difficulties_contacts', 
+                  'lc_dv', 'bmimotherf5','dbsi3m', 'dbsi3f')] <- 0
+
+# do not use or impute age variables or missingness vars
+predictormatrix[, c("age",'agechild13')] <- predictormatrix[c("age",'agechild13'),] <- 0
+predictormatrix[, c("totalmispost",'totalmispre')] <- predictormatrix[c("totalmispost",'totalmispre'),] <- 0
+
+# do not use age_p as a predictor because it almost is constant
+predictormatrix[,'agep'] <- 0
+
+# The indicators for the IQ-achievement discrepancy were not used as well, given they would cause a lot of multicollinearity
+predictormatrix[, c("iq",'cito')] <- predictormatrix[c("iq",'cito'),] <- 0
+```
+
+Check the secquence: I always make sure the passively imputed values are imputed after their donors are imputed. 
+
+```{r, echo=FALSE, include=TRUE, results='asis'} 
+# visit the secquence
+VisSeq <- imp0$visitSequence
+```
+
+I am aiming at doing 30 imputation with 60 iteration, however for sake of time I did way less in this script. 
+
+```{r eval =FALSE}
+# make imp list prenatal data
+implist <- mice(datarisk, m = 30, maxit = 60, seed = 08121996, method = meth, visitSequence = VisSeq, predictorMatrix = predictormatrix)
+
+# save it
+saveRDS(implist, "imp_data_20210325.rds")
+saveRDS(datarisk, "datarisk_20210325.rds")
+
+```
+
+## Latent model
+
+I did the prenatal and postnatal analysis seperately. I inspected the following fit indices:
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+fitmeas <- c('chisq', 'df', 'pvalue', 'cfi', 'tli', 'rmsea','rmsea.ci.lower', 'rmsea.ci.upper', 'srmr')
+```
+
+### Prenatal model
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# cfa model primary analysis
+cfa.model_pre1 <- '                                                           
+
+# latent variable modelling 
+r1 =~ life_events_m + contextual_m + personal_stress_m + interpersonal_m
+
+# primary analysis IQ-achievement discrepancy
+cm ~ r1 + age + gender'
+```
+
+The actual analysis were done with the following code:
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+mymodelfit_pre1imp<- runMI(cfa.model_pre1, data = implist, fun = "sem", estimator = "MLR", std.lv = T)
+(pre1imp <- summary(mymodelfit_pre1imp, standardized=T, rsq=T))
+```
+
+Fit was sufficient
+```{r, echo=FALSE, include=TRUE, results='asis'}
+fitmeasures(mymodelfit_pre1imp)[fitmeas]
+```
+
+### Postnatal model
+
+The model was defined as the following: 
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# cfa model primary analysis
+cfa.model_post1 <- '                                                           
+
+# latent variable modelling 
+r2 =~ lc_le + lc_ce + lc_pr + lc_ip + lc_dv
+
+# primary analysis IQ-achievement discrepancy
+cm ~ r2 + age + gender'
+```
+
+The actual analysis were done with the following code:
+
+```{r, echo=FALSE, include=TRUE, results='asis'}
+mymodelfit_post1imp<- runMI(cfa.model_post1, data = implist, fun = "sem", estimator = "MLR", std.lv = T)
+(post1imp <- summary(mymodelfit_post1imp, standardized=T, rsq=T))
+```
+
+Fit was sufficient
+```{r, echo=FALSE, include=TRUE, results='asis'}
+# get fit measures for primary model
+fitmeasures(mymodelfit_post1imp)[fitmeas]
+```
